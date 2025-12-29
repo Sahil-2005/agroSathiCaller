@@ -1,0 +1,37 @@
+# Ignore Python bytecode files
+__pycache__/
+*.py[cod]
+
+# Ignore environment files
+.env
+
+# Ignore virtual environment directories
+venv/
+env/
+.venv/
+.env/
+
+# Ignore package distribution files
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Ignore IDE specific files
+.idea/
+.vscode/
+
+# Ignore system-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore logs and temporary files
+*.log
+*.bak
+*.swp
+
+# Ignore data directory output if it's not meant to be tracked
+data/
+
+# Ignore the requirements.txt if it is auto-generated and shouldn't be manually tracked
+requirements.txt
