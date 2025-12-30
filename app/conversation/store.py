@@ -19,7 +19,7 @@ import os
 
 FILE = "data/calls.json"
 
-def save_answer(call_id, key, value):
+def save_answer(call_id, key, value, phone=None):
     os.makedirs("data", exist_ok=True)
 
     data = {}
@@ -37,10 +37,14 @@ def save_answer(call_id, key, value):
 
     # ✅ Ensure call entry exists
     if call_id not in data:
-        data[call_id] = {}
+        # data[call_id] = {}
+        data[call_id] = {
+            "phone": phone,
+            "answers": {}
+        }
 
     # ✅ Save answer
-    data[call_id][key] = value
+    data[call_id]["answers"][key] = value
 
     # ✅ Write back safely
     with open(FILE, "w", encoding="utf-8") as f:

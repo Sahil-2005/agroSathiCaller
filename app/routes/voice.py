@@ -89,6 +89,8 @@ async def handle_answer(request: Request, step: int):
     speech = form.get("SpeechResult")
     digits = form.get("Digits")
     call_id = form.get("CallSid")
+    from_number = form.get("To")   # +91XXXXXXXXXX
+
 
     vr = VoiceResponse()
 
@@ -122,7 +124,7 @@ async def handle_answer(request: Request, step: int):
 
     # ✅ Save valid answer
     key, _ = QUESTIONS[step]
-    save_answer(call_id, key, user_input)
+    save_answer(call_id, key, user_input, from_number)
 
     next_step = step + 1
 
