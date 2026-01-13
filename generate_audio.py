@@ -1,37 +1,29 @@
 import os
+import json
 import asyncio
 import edge_tts
 
-# 🟢 We use "hi-IN-SwaraNeural" for a very natural female Hindi voice.
-# Options: "hi-IN-SwaraNeural" (Female), "hi-IN-MadhurNeural" (Male)
+# Load script from JSON
+with open("app/script.json", "r", encoding="utf-8") as f:
+    SCRIPT_DATA = json.load(f)
+
 VOICE = "hi-IN-SwaraNeural"
-
-QUESTIONS = {
-    "intro": "नमस्ते, मैं आपका एग्रोसाथी हूँ। जारी रखने के लिए कोई भी बटन दबाएँ।",
-    "q1": "आप कौन सी फसल बेच रहे हैं?",
-    "q2": "उस फसल की किस्म क्या है?",
-    "q3": "आपने कितनी मात्रा काटी है?",
-    "q4": "फसल कब बोई गई थी?",
-    "error": "मुझे आपकी आवाज़ ठीक से सुनाई नहीं दी। कृपया दोबारा बताइए।",
-    "outro": "धन्यवाद। आपकी जानकारी दर्ज कर ली गई है।"
-}
-
 output_dir = "app/static"
 os.makedirs(output_dir, exist_ok=True)
 
 async def generate_mp3s():
-    print(f"🚀 Generating High-Quality Neural Audio using {VOICE}...")
+    print(f"🚀 Generating Audio for {len(SCRIPT_DATA)} items...")
     
-    for key, text in QUESTIONS.items():
-        print(f"Generating: {key}...")
+    for item in SCRIPT_DATA:
+        key = item["key"]
+        text = item["text"]
         file_path = f"{output_dir}/{key}.mp3"
         
+        print(f"Generating: {key}...")
         try:
-            # Generate using Edge TTS
             communicate = edge_tts.Communicate(text, VOICE)
             await communicate.save(file_path)
             print(f"✅ Saved {file_path}")
-            
         except Exception as e:
             print(f"❌ Failed to generate {key}: {e}")
 
