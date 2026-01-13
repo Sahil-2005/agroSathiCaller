@@ -1,156 +1,120 @@
-from fastapi import APIRouter, Request, Response
+import os
+import json
+from fastapi import APIRouter, Request, Response, Depends
 from twilio.twiml.voice_response import VoiceResponse, Gather
-from app.conversation.states import QUESTIONS
 from app.conversation.store import save_answer
+from app.security import validate_twilio_request
 
 router = APIRouter()
 
+BASE_URL = os.getenv("BASE_URL")
 
-@router.post("/start")
+# 1. LOAD SCRIPT DYNAMICALLY
+def load_script():
+    with open("app/script.json", "r", encoding="utf-8") as f:
+        return json.load(f)
+
+script_data = load_script()
+
+# Filter out only the actual questions for the flow logic
+QUESTIONS = [item for item in script_data if item.get("is_question") is True]
+
+@router.post("/start", dependencies=[Depends(validate_twilio_request)])
 async def start_call():
     vr = VoiceResponse()
+    
+    # Play the intro audio defined in JSON with key "intro"
+    vr.play(f"{BASE_URL}/static/intro.mp3")
 
-    vr.say(
-        "नमस्ते, मैं आपका एग्रोसाथी हूँ।",
-        language="hi-IN"
-    )
-
+    # Initial gather to start the flow
     gather = Gather(
-        input="speech dtmf",
-        # action="/voice/answer?step=-1",  # 👈 IMPORTANT
-        action="/voice/answer?step=0&retry=0",  # 👈 IMPORTANT
-        language="hi-IN",
-        timeout=3,              # Reduced from 5 - wait for input to start
-        speechTimeout="auto",   # Auto-detect end of speech (faster)
-        profanityFilter=False   # Skip filtering = faster response
+        input="dtmf",
+        action="/voice/answer?step=-1&retry=0", 
+        timeout=4,
+        numDigits=1
     )
-
-    gather.say(
-        "जारी रखने के लिए कोई भी बटन दबाएँ।",
-        language="hi-IN"
-    )
-
     vr.append(gather)
 
     return Response(str(vr), media_type="application/xml")
 
 
-@router.post("/answer")
-# async def handle_answer(request: Request, step: int):
+@router.post("/answer", dependencies=[Depends(validate_twilio_request)])
 async def handle_answer(request: Request, step: int, retry: int = 0):
     form = await request.form()
-
     speech = form.get("SpeechResult")
     digits = form.get("Digits")
     call_id = form.get("CallSid")
-    from_number = form.get("To")   # +91XXXXXXXXXX
-
+    user_phone = form.get("To") 
 
     vr = VoiceResponse()
 
-    # 🟡 STEP -1 → Trial keypress, DO NOT save anything
+    # --- HANDLE START (Intro) ---
     if step == -1:
-        gather = Gather(
-            input="speech",
-            action="/voice/answer?step=0",
-            language="hi-IN",
-            timeout=3,              # Reduced - wait for speech to start
-            speechTimeout="auto",   # Auto-detect end of speech
-            profanityFilter=False,
-            hints=QUESTIONS[0][0]   # Hint for better recognition
-        )
-        gather.say(QUESTIONS[0][1], language="hi-IN")
-        vr.append(gather)
+        # Start the first question (index 0)
+        return await ask_question(vr, 0, 0)
 
-        return Response(str(vr), media_type="application/xml")
-
-    # 🟢 Normal speech handling
+    # --- CAPTURE ANSWER ---
     user_input = speech or digits or ""
 
-    # if not user_input:
-    #     gather = Gather(
-    #         input="speech",
-    #         action=f"/voice/answer?step={step}",
-    #         language="hi-IN",
-    #         timeout=5
-    #     )
-    #     gather.say("मुझे ठीक से सुनाई नहीं दिया। कृपया दोबारा बताएं।", language="hi-IN")
-    #     vr.append(gather)
-
-    #     return Response(str(vr), media_type="application/xml")
-
-    # # ✅ Save valid answer
-    # key, _ = QUESTIONS[step]
-    # save_answer(call_id, key, user_input, from_number)
-
-    # next_step = step + 1
-
-    # if next_step >= len(QUESTIONS):
-    #     vr.say("धन्यवाद। आपकी जानकारी दर्ज कर ली गई है।", language="hi-IN")
-    #     vr.hangup()
-    #     return Response(str(vr), media_type="application/xml")
-
-    # gather = Gather(
-    #     input="speech",
-    #     action=f"/voice/answer?step={next_step}",
-    #     language="hi-IN",
-    #     timeout=5
-    # )
-    # gather.say(QUESTIONS[next_step][1], language="hi-IN")
-    # vr.append(gather)
-
-    # return Response(str(vr), media_type="application/xml")
-
-# -------------------------
-# SILENCE VALIDATION
-# -------------------------
-    if not user_input or len(user_input.strip()) < 2:
+    # Validation: Empty Input
+    if not user_input or len(user_input.strip()) < 1:
         if retry >= 2:
-            vr.say(
-                "मुझे आपकी आवाज़ समझ नहीं आ रही है। हम बाद में फिर कोशिश करेंगे। धन्यवाद।",
-                language="hi-IN"
-            )
+            vr.play(f"{BASE_URL}/static/outro.mp3")
             vr.hangup()
             return Response(str(vr), media_type="application/xml")
 
-        gather = Gather(
-            input="speech",
-            action=f"/voice/answer?step={step}&retry={retry + 1}",
-            language="hi-IN",
-            timeout=5
-        )
-        gather.say(
-            "मुझे आपकी आवाज़ ठीक से सुनाई नहीं दी। कृपया दोबारा बताइए।",
-            language="hi-IN"
-        )
-        vr.append(gather)
+        vr.play(f"{BASE_URL}/static/error.mp3")
+        return await ask_question(vr, step, retry + 1)
 
-        return Response(str(vr), media_type="application/xml")
+    # ✅ Save valid answer dynamically
+    # We look up the key based on the current step index in our QUESTIONS list
+    if 0 <= step < len(QUESTIONS):
+        current_q = QUESTIONS[step]
+        db_key = current_q["key"]  # e.g., "crop", "variety"
+        await save_answer(call_id, db_key, user_input, phone=user_phone)
 
-    # ✅ Save valid answer
-    key, _ = QUESTIONS[step]
-    save_answer(call_id, key, user_input, from_number)
-
+    # --- MOVE TO NEXT STEP ---
     next_step = step + 1
 
+    # Check if we have more questions
     if next_step >= len(QUESTIONS):
-        vr.say("धन्यवाद। आपकी जानकारी दर्ज कर ली गई है।", language="hi-IN")
+        vr.play(f"{BASE_URL}/static/outro.mp3")
         vr.hangup()
         return Response(str(vr), media_type="application/xml")
 
-    # Determine hint for next question based on expected answer type
-    next_hint = QUESTIONS[next_step][0] if next_step < len(QUESTIONS) else ""
+    # Ask next question
+    return await ask_question(vr, next_step, 0)
+
+
+async def ask_question(vr, step_index, retry):
+    """
+    Dynamically looks up the question audio and hints from the JSON list.
+    """
+    if step_index >= len(QUESTIONS):
+        return
+    
+    question_data = QUESTIONS[step_index]
+    key = question_data["key"]
+    
+    # Audio filename matches the key (e.g., "crop.mp3")
+    audio_url = f"{BASE_URL}/static/{key}.mp3"
+    
+    # Get hints from JSON, default to empty string
+    hint_text = question_data.get("hints", "")
 
     gather = Gather(
         input="speech",
-        action=f"/voice/answer?step={next_step}&retry=0",
+        action=f"/voice/answer?step={step_index}&retry={retry}",
         language="hi-IN",
-        timeout=3,              # Reduced - faster response
-        speechTimeout="auto",   # Auto-detect when speech ends
+        timeout=4,
+        speechTimeout="auto",
         profanityFilter=False,
-        hints=next_hint         # Helps speech recognition
+        hints=hint_text,      
+        enhanced=True,        
+        speechModel="phone_call"
     )
-    gather.say(QUESTIONS[next_step][1], language="hi-IN")
+    
+    gather.play(audio_url)
     vr.append(gather)
-
+    
     return Response(str(vr), media_type="application/xml")
