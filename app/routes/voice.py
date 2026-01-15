@@ -1,156 +1,149 @@
-from fastapi import APIRouter, Request, Response
+import os
+import json
+import glob
+from fastapi import APIRouter, Request, Response, Depends, HTTPException
 from twilio.twiml.voice_response import VoiceResponse, Gather
-from app.conversation.states import QUESTIONS
 from app.conversation.store import save_answer
+from app.security import validate_twilio_request
 
 router = APIRouter()
+BASE_URL = os.getenv("BASE_URL")
 
+# --- CACHE SCRIPTS IN MEMORY ---
+# Structure: { "agrosathi": [list of steps], "survey": [...] }
+SCRIPTS_CACHE = {}
 
-@router.post("/start")
-async def start_call():
+def load_scripts():
+    """Loads all scripts from app/scripts/ directory into memory"""
+    files = glob.glob("app/scripts/*.json")
+    for file in files:
+        try:
+            with open(file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                slug = data.get("slug")
+                if slug:
+                    # Determine questions (items where is_question is True)
+                    questions = [item for item in data.get("flow", []) if item.get("is_question")]
+                    # Store both the full flow and just the questions for easy access
+                    SCRIPTS_CACHE[slug] = {
+                        "full_flow": data.get("flow", []),
+                        "questions": questions
+                    }
+                    print(f"✅ Loaded script: {slug}")
+        except Exception as e:
+            print(f"❌ Error loading {file}: {e}")
+
+# Load on startup (or you can call this inside a startup event in main.py)
+load_scripts() 
+
+@router.post("/start", dependencies=[Depends(validate_twilio_request)])
+async def start_call(request: Request):
+    # Get the script slug from query params (default to agrosathi if missing)
+    script_slug = request.query_params.get("script", "agrosathi")
+    
+    if script_slug not in SCRIPTS_CACHE:
+         # Reload scripts if not found (in case a new file was added)
+        load_scripts()
+        if script_slug not in SCRIPTS_CACHE:
+            vr = VoiceResponse()
+            vr.say("System error. Script not found.")
+            vr.hangup()
+            return Response(str(vr), media_type="application/xml")
+
     vr = VoiceResponse()
+    
+    # Play Intro: Note the dynamic path /static/{script_slug}/intro.mp3
+    vr.play(f"{BASE_URL}/static/{script_slug}/intro.mp3")
 
-    vr.say(
-        "नमस्ते, मैं आपका एग्रोसाथी हूँ।",
-        language="hi-IN"
-    )
-
+    # Start Flow
+    # ⚠️ We must pass script={script_slug} to the next step
     gather = Gather(
-        input="speech dtmf",
-        # action="/voice/answer?step=-1",  # 👈 IMPORTANT
-        action="/voice/answer?step=0&retry=0",  # 👈 IMPORTANT
-        language="hi-IN",
-        timeout=3,              # Reduced from 5 - wait for input to start
-        speechTimeout="auto",   # Auto-detect end of speech (faster)
-        profanityFilter=False   # Skip filtering = faster response
+        input="dtmf",
+        action=f"/voice/answer?step=-1&retry=0&script={script_slug}", 
+        timeout=4,
+        numDigits=1
     )
-
-    gather.say(
-        "जारी रखने के लिए कोई भी बटन दबाएँ।",
-        language="hi-IN"
-    )
-
     vr.append(gather)
 
     return Response(str(vr), media_type="application/xml")
 
 
-@router.post("/answer")
-# async def handle_answer(request: Request, step: int):
-async def handle_answer(request: Request, step: int, retry: int = 0):
+@router.post("/answer", dependencies=[Depends(validate_twilio_request)])
+async def handle_answer(request: Request, step: int, retry: int = 0, script: str = "agrosathi"):
     form = await request.form()
-
     speech = form.get("SpeechResult")
     digits = form.get("Digits")
     call_id = form.get("CallSid")
-    from_number = form.get("To")   # +91XXXXXXXXXX
+    user_phone = form.get("To")
 
+    # Retrieve specific script data
+    if script not in SCRIPTS_CACHE:
+        load_scripts() # Try reload
+    
+    script_data = SCRIPTS_CACHE.get(script)
+    if not script_data:
+        return Response(str(VoiceResponse().hangup()), media_type="application/xml")
 
+    QUESTIONS = script_data["questions"]
+    
     vr = VoiceResponse()
 
-    # 🟡 STEP -1 → Trial keypress, DO NOT save anything
+    # --- HANDLE START ---
     if step == -1:
-        gather = Gather(
-            input="speech",
-            action="/voice/answer?step=0",
-            language="hi-IN",
-            timeout=3,              # Reduced - wait for speech to start
-            speechTimeout="auto",   # Auto-detect end of speech
-            profanityFilter=False,
-            hints=QUESTIONS[0][0]   # Hint for better recognition
-        )
-        gather.say(QUESTIONS[0][1], language="hi-IN")
-        vr.append(gather)
+        return await ask_question(vr, 0, 0, script, QUESTIONS)
 
-        return Response(str(vr), media_type="application/xml")
-
-    # 🟢 Normal speech handling
+    # --- PROCESS INPUT ---
     user_input = speech or digits or ""
 
-    # if not user_input:
-    #     gather = Gather(
-    #         input="speech",
-    #         action=f"/voice/answer?step={step}",
-    #         language="hi-IN",
-    #         timeout=5
-    #     )
-    #     gather.say("मुझे ठीक से सुनाई नहीं दिया। कृपया दोबारा बताएं।", language="hi-IN")
-    #     vr.append(gather)
-
-    #     return Response(str(vr), media_type="application/xml")
-
-    # # ✅ Save valid answer
-    # key, _ = QUESTIONS[step]
-    # save_answer(call_id, key, user_input, from_number)
-
-    # next_step = step + 1
-
-    # if next_step >= len(QUESTIONS):
-    #     vr.say("धन्यवाद। आपकी जानकारी दर्ज कर ली गई है।", language="hi-IN")
-    #     vr.hangup()
-    #     return Response(str(vr), media_type="application/xml")
-
-    # gather = Gather(
-    #     input="speech",
-    #     action=f"/voice/answer?step={next_step}",
-    #     language="hi-IN",
-    #     timeout=5
-    # )
-    # gather.say(QUESTIONS[next_step][1], language="hi-IN")
-    # vr.append(gather)
-
-    # return Response(str(vr), media_type="application/xml")
-
-# -------------------------
-# SILENCE VALIDATION
-# -------------------------
-    if not user_input or len(user_input.strip()) < 2:
+    if not user_input or len(user_input.strip()) < 1:
         if retry >= 2:
-            vr.say(
-                "मुझे आपकी आवाज़ समझ नहीं आ रही है। हम बाद में फिर कोशिश करेंगे। धन्यवाद।",
-                language="hi-IN"
-            )
+            vr.play(f"{BASE_URL}/static/{script}/outro.mp3")
             vr.hangup()
             return Response(str(vr), media_type="application/xml")
 
-        gather = Gather(
-            input="speech",
-            action=f"/voice/answer?step={step}&retry={retry + 1}",
-            language="hi-IN",
-            timeout=5
-        )
-        gather.say(
-            "मुझे आपकी आवाज़ ठीक से सुनाई नहीं दी। कृपया दोबारा बताइए।",
-            language="hi-IN"
-        )
-        vr.append(gather)
+        vr.play(f"{BASE_URL}/static/{script}/error.mp3")
+        return await ask_question(vr, step, retry + 1, script, QUESTIONS)
 
-        return Response(str(vr), media_type="application/xml")
+    # ✅ Save Answer (Include script name in DB to differentiate campaigns)
+    if 0 <= step < len(QUESTIONS):
+        current_q = QUESTIONS[step]
+        db_key = f"{script}_{current_q['key']}" # e.g. "agrosathi_crop" or just "crop"
+        
+        # We save it with the specific key defined in JSON
+        await save_answer(call_id, current_q['key'], user_input, phone=user_phone)
 
-    # ✅ Save valid answer
-    key, _ = QUESTIONS[step]
-    save_answer(call_id, key, user_input, from_number)
-
+    # --- NEXT STEP ---
     next_step = step + 1
-
     if next_step >= len(QUESTIONS):
-        vr.say("धन्यवाद। आपकी जानकारी दर्ज कर ली गई है।", language="hi-IN")
+        vr.play(f"{BASE_URL}/static/{script}/outro.mp3")
         vr.hangup()
         return Response(str(vr), media_type="application/xml")
 
-    # Determine hint for next question based on expected answer type
-    next_hint = QUESTIONS[next_step][0] if next_step < len(QUESTIONS) else ""
+    return await ask_question(vr, next_step, 0, script, QUESTIONS)
+
+
+async def ask_question(vr, step_index, retry, script_slug, questions_list):
+    """
+    Asks question using audio from the specific script folder.
+    """
+    question_data = questions_list[step_index]
+    key = question_data["key"]
+    
+    # 🟢 DYNAMIC AUDIO PATH
+    audio_url = f"{BASE_URL}/static/{script_slug}/{key}.mp3"
+    hint_text = question_data.get("hints", "")
 
     gather = Gather(
         input="speech",
-        action=f"/voice/answer?step={next_step}&retry=0",
+        # ⚠️ Propagate the script slug in the action URL
+        action=f"/voice/answer?step={step_index}&retry={retry}&script={script_slug}",
         language="hi-IN",
-        timeout=3,              # Reduced - faster response
-        speechTimeout="auto",   # Auto-detect when speech ends
-        profanityFilter=False,
-        hints=next_hint         # Helps speech recognition
+        timeout=4,
+        hints=hint_text,      
+        enhanced=True,        
+        speechModel="phone_call"
     )
-    gather.say(QUESTIONS[next_step][1], language="hi-IN")
+    
+    gather.play(audio_url)
     vr.append(gather)
-
     return Response(str(vr), media_type="application/xml")
