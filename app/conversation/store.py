@@ -1,51 +1,25 @@
-# import json, os
+from app.database import get_database
+from datetime import datetime
 
-# FILE = "data/calls.json"
+async def save_answer(call_id: str, key: str, value: str, phone: str = None):
+    db = get_database()
+    if db is None:
+        print("⚠️ Database not connected!")
+        return
 
-# def save_answer(call_id, key, value):
-#     os.makedirs("data", exist_ok=True)
+    collection = db["calls"]
 
-#     if os.path.exists(FILE):
-#         data = json.load(open(FILE))
-#     else:
-#         data = {}
+    update_data = {
+        f"answers.{key}": value,
+        "updated_at": datetime.utcnow()
+    }
+    
+    if phone:
+        update_data["phone"] = phone
 
-#     data.setdefault(call_id, {})[key] = value
-#     json.dump(data, open(FILE, "w"), indent=2)
-
-
-import json
-import os
-
-FILE = "data/calls.json"
-
-def save_answer(call_id, key, value, phone=None):
-    os.makedirs("data", exist_ok=True)
-
-    data = {}
-
-    # ✅ Safely load existing data
-    if os.path.exists(FILE):
-        try:
-            with open(FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content:
-                    data = json.loads(content)
-        except json.JSONDecodeError:
-            # File exists but is corrupted/empty
-            data = {}
-
-    # ✅ Ensure call entry exists
-    if call_id not in data:
-        # data[call_id] = {}
-        data[call_id] = {
-            "phone": phone,
-            "answers": {}
-        }
-
-    # ✅ Save answer
-    data[call_id]["answers"][key] = value
-
-    # ✅ Write back safely
-    with open(FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # Upsert: Create if new, update if exists
+    await collection.update_one(
+        {"call_sid": call_id},
+        {"$set": update_data},
+        upsert=True
+    )
